@@ -9,12 +9,10 @@ ESC:: ExitApp()
 
 SetWorkingDir(A_ScriptDir)  ; Ensures a consistent starting directory.
 
-retryCount := 5        ; Number of retries to resolve the UIA error
-retryDelay := 500      ; Delay between retries (in milliseconds)
-
 ; Function to safely get UIA root element with retries
 GetRootElementSafely(hwnd) {
-    global retryCount, retryDelay
+    global retryCount := 5        ; Number of retries to resolve the UIA error
+    global retryDelay := 500      ; Delay between retries (in milliseconds)
     Loop retryCount {
         try {
             ; Verify window exists and activate it
@@ -35,6 +33,10 @@ GetRootElementSafely(hwnd) {
             ToolTip("UIA Error: " e.message ". Retrying...")
             Sleep(retryDelay)
         }
+
+        if (retryCount == 3) {
+            Click()
+        }
     }
     MsgBox("Failed to retrieve UIA root element after retries.")
     ExitApp()
@@ -50,8 +52,7 @@ GetArrayLength(arr) {
 }
 
 ; Function to handle key input loop
-GetSubKeys() {
-    global inputValues
+GetSubKeys(inputValues) {
     ; Display Tooltip with sub-hotkey options and the option to select multiple
     ToolTip("Select multiple sub-hotkeys:`nW: Check for updates`n1-3: Call Contact 1-3 & Company 4-6`nT: Title search`nC: Contact info search`nN: News search`nE: Email address search`nP: Phone # search`nZ: time Zone search`nPress keys one after another.")
 
@@ -74,7 +75,7 @@ GetSubKeys() {
     if InStr(inputValues, SubKey) {
         SubKeys .= SubKey
     } else {
-        return GetSubKeys()  ; Re-loop the input request
+        return GetSubKeys(inputValues)  ; Re-loop the input request
     }
 
     ; Loop to collect additional valid subkey inputs, unless 'a' is pressed
@@ -99,7 +100,7 @@ GetSubKeys() {
             }
             SubKeys .= SubKey
         } else {
-            return GetSubKeys()  ; Re-loop the input request
+            return GetSubKeys(inputValues)  ; Re-loop the input request
         }
     }
 
@@ -160,7 +161,7 @@ ProcessClipboardContent(content) {
 ; Function to activate the Chrome window
 ActivateChromeWindow() {
     if hwnd := WinExist("ahk_exe chrome.exe") {
-        WinActivate
+        WinActivate()
         WinWaitActive("ahk_exe chrome.exe")
         return hwnd
     } else {
@@ -176,7 +177,7 @@ ResetGlobals(names) {
     }
 }
 
-GetGrowablyNames(SubKeys) {
+GetGrowablyNames(SubKeys, rootElement) {
     ToolTip("Getting Growably names using " SubKeys ".")
     SetTimer () => ToolTip(""), -2000
     failure := false
@@ -189,7 +190,7 @@ GetGrowablyNames(SubKeys) {
     ; Get the contact's name from Growably
     if InStr(SubKeys, "p") || InStr(SubKeys, "e") || InStr(SubKeys, "c") || InStr(SubKeys, "a") || InStr(SubKeys, "n") || InStr(SubKeys, "@") {
         try {
-            contactName := rootElement.WaitElementFromPath("VKr")
+            contactName := rootElement.WaitElementFromPath("VKr").Name
         } catch {
             contactName := ""
             ToolTip("Failed to get contact's name from Growably.")
@@ -267,7 +268,29 @@ GetGrowablyNames(SubKeys) {
             locationFailure++
             Sleep(1000)
             if locationFailure = 1 {
-                contactName := rootElement.FindFirst({LocalizedType: "edit", Name: "Last Name"})
+                RetryContact1:
+                try {
+                    contactName := rootElement.FindFirst({LocalizedType: "edit", Name: "Last Name"})
+                } catch {
+                    contactName := ""
+                }
+                if contactName = "" {
+                    try {
+                        contactName := rootElement.FindFirst({LocalizedType: "edit", Name: "First Name"})
+                    } catch {
+                        contactName := ""
+                    }
+                }
+                if contactName = "" {
+                    contactName := rootElement.FindAll({LocalizedType: "text", Name: "Contact"})
+                    for i, contact in contactName {
+                        if i = 2 {
+                            contact.Click()
+                        }
+                    }
+                    goto RetryContact1
+                }
+                
                 if StrLen(contactName.Name) > 1 {
                     contactName.Click()
                 } else {
@@ -337,14 +360,19 @@ GetGrowablyNames(SubKeys) {
     return names
 }
 
-updateGrowablyTimeZone(timezone) {
+updateGrowablyTimeZone(timezone, savedNames, rootElement) {
+    currentName := ""
+    successTries := 0
+
     if timezone = "" || timezone = "null" || timezone = "false" || timezone = "0" {
-        names := GetGrowablyNames("c")
+        names := GetGrowablyNames("c", rootElement)
         if names = "" || names = 0 {
-            names := GetGrowablyNames("@")
+            names := GetGrowablyNames("@", rootElement)
         }
-        FileAppend("Failed to get & set time zone for: " names "`n", "FailedTasks.txt")
-        return false
+        if names = "" || names = 0 {
+            FileAppend("Failed to get & set time zone for: " names "`n", "FailedTasks.txt")
+            return false
+        }
     }
 
     ;MsgBox("Setting time zone to: " timezone)
@@ -367,8 +395,6 @@ updateGrowablyTimeZone(timezone) {
     success := false
     ; Get HWND and rootElement of the active Chrome window
     Sleep(600)
-    hwnd := ActivateChromeWindow()
-    rootElement := GetRootElementSafely(hwnd)
 
     updateGrowablyTimeZone1:
     ; Find all combo box elements
@@ -401,7 +427,7 @@ updateGrowablyTimeZone(timezone) {
                 if success {
                     break
                 } else {
-                    ToolTip("Failed to find time zone combo box.")
+                    ToolTip("Failed to find time zone combo box. (match)")
                     SetTimer () => ToolTip(""), -2000
                     goto UpdateGrowablyTimeZone1
                 }
@@ -411,13 +437,40 @@ updateGrowablyTimeZone(timezone) {
         }
     }
 
-    if !success {
-        ToolTip("Failed to find time zone combo box.")
-        SetTimer () => ToolTip(""), -2000
-        Sleep(500)
+    if !success && successTries < 4 {
+        ToolTip("Failed to find time zone combo box. (3 or under - no match)")
+        successTries++
+        goto UpdateGrowablyTimeZone1
     }
 
-    return true
+
+    if !success && successTries > 3 {
+        ToolTip("Failed to find time zone combo box. (no match)")
+        SetTimer () => ToolTip(""), -2000
+        Sleep(2000)
+        goto UpdateGrowablyTimeZone1
+    } else {
+        Sleep(500)
+        Loop {
+            Sleep(500)
+
+            currentName := GetGrowablyNames("@", rootElement)
+            if currentName = "" || currentName = 0 {
+                currentName := GetGrowablyNames("c", rootElement)
+            }
+            if savedNames == currentName {
+                ; Do nothing
+            } else {
+                Sleep(1500)
+                break
+            }
+        }
+        
+        savedNames := currentName
+        return true
+    }
+
+    MsgBox("Failed to handle setting time zone correctly.")
 }
 
 UpdateLastNameGrowably(lastName) {
@@ -449,10 +502,11 @@ UpdateLastNameGrowably(lastName) {
 }
 
 GetInfoFromSearch(searchType, name := "") {
-    ;Sleep(300)
+    Sleep(300)
     global start := A_TickCount
     static maxTime := 5000
-    Loop {
+    global tries := 0
+    Loop 50 {
         elapsedTime := (A_TickCount - start) / 1000
         if elapsedTime > maxTime {
             ToolTip("")
@@ -502,7 +556,7 @@ GetInfoFromSearch(searchType, name := "") {
 
         Sleep(100)
     }
-    global start := 0
+    start := 0
     Sleep(500)
     ToolTip("Getting info from Google Search.")
     SetTimer () => ToolTip(""), -2000
@@ -550,37 +604,38 @@ GetInfoFromSearch(searchType, name := "") {
                     Sleep(100)
                     return "GMT-09:00 US/Alaska (AKST)"
                 }
-                if InStr(timeZone.Name, "HST") || InStr(timeZone.Name, "HDT") || InStr(timeZone.Name, "GMT-10") {
+                if InStr(timeZone.Name, "HST") || InStr(timeZone.Name, "HDT") || InStr(timeZone.Name, "GMT-10") || InStr(timeZone.Name, "hawaii") {
                     Send("^w")
                     Sleep(100)
                     return "GMT-10:00 Pacific/Honolulu (HST)"
                 }
             }
+
             if tries = 0 {
                 timeZoneText := rootElement.FindAll({LocalizedType: "header"})
-                tries := 1
+                tries++
                 goto TimeZoneCheck1
             }
             if tries = 1 {
                 timeZoneText := rootElement.FindAll({LocalizedType: "item"})
-                tries := 2
+                tries++
                 goto TimeZoneCheck1
             }
             if tries = 2 {
                 for timeZone in timeZoneText {
                     global strText := timeZone.Name "`n"
                 }
-                names := GetGrowablyNames("c")
+                Send("^w")
+                Sleep(100)
+                names := GetGrowablyNames("c", rootElement)
                 if names = "" || names = 0 {
-                    names := GetGrowablyNames("@")
+                    names := GetGrowablyNames("@", rootElement)
                 }
                 FileAppend("Failed to get & set time zone for: " names "`n", "FailedTasks.txt")
                 ;MsgBox("strText for time zone check failure: `n" strText)
                 ToolTip("Failed to get time zone from Google (match).")
                 SetTimer () => ToolTip(""), -2000
                 Sleep(2000)
-                Send("^w")
-                Sleep(100)
                 return false
             }
         } catch {
@@ -686,10 +741,7 @@ CallWithRingCentral(finalNumber) {
     Send(finalNumber)
 }
 
-CallContact(callNumber) {
-    WinActivate("A")
-    hwnd := ActivateChromeWindow()
-    rootElement := GetRootElementSafely(hwnd)
+CallContact(callNumber, rootElement) {
 
     if (callNumber >= 1 && callNumber <= 3) {
         try {
@@ -827,12 +879,8 @@ CallContact(callNumber) {
     return true
 }
 
-CheckForUpdates(type) {
-    global SubKeys
+CheckForUpdates(type, SubKeys, rootElement) {
 
-    WinActivate("A")
-    hwnd := ActivateChromeWindow()
-    rootElement := GetRootElementSafely(hwnd)
     global strSubKeys := ""
     global foundPhone := false
     global phoneName := ""
@@ -905,7 +953,7 @@ CheckForUpdates(type) {
             }
             if foundPhone && (0 < StrLen(phoneValue)) && (StrLen(phoneName) < 2) {
                 MsgBox("Found phone name but no value.`nPhone name: " phoneName "`nPhone value: " phoneValue)
-                names := GetGrowablyNames("p")
+                names := GetGrowablyNames("p", rootElement)
                 FileAppend("No phone number listed for : " names "`n", "FailedTasks.txt")
                 break
             }
@@ -913,7 +961,7 @@ CheckForUpdates(type) {
 
         if !foundPhone {
             MsgBox("Failed to find phone in Growably.")
-            names := GetGrowablyNames("p")
+            names := GetGrowablyNames("p", rootElement)
             FileAppend("No phone number listed for : " names "`n", "FailedTasks.txt")
         } else {
             foundPhone := false
@@ -947,21 +995,19 @@ F1:: {
     global pacificStates := [" CA ", " CA,", "California", " WA ", " WA,", " NV ", " NV,", "Nevada", " OR ", " OR,", "Oregon"]
     global mountainStates := [" ID ", " ID,", "Indiana", " MT ", " MT,", "Montana", " WY ", " WY,", "Wyoming", " UT ", " UT,", "Utah", " CO ", " CO,", "Colorado", " AZ ", " AZ,", "Arizona", " NM ", " NM,", "New Mexico"]
     global centralStates := [" ND ", " ND,", "North Dakota", " SD ", " SD,", "South Dakota", " NE ", " NE,", "Nebraska", " MN ", " MN,", "Minnesota", " IA ", " IA,", "Iowa", " WI ", " WI,", "Wisconsin", " IL ", " IL,", "Illinois", " MO ", " MO,", "Missouri", " KS ", " KS,", "Kansas", " OK ", " OK,", "Oklahoma", " AR ", " AR,", "Arizona", " TX ", " TX,", "Texas", " LA ", " LA,", "Louisiana", " MS ", " MS,", "Missouri", " AL ", " AL,", "Alabama"]
-    global easternStates := [" FL ", " FL,", "Florida", " GA ", " GA,", "Georgia", " SC ", " SC,", "Sourth Carolina", " NC ", " NC,", "North Carolina", " VA ", " VA,", "Virginia", " WV ", " WV,", "West Virginia", " OH ", " OH,", "Ohio", " MI ", " MI,", "Mississippi", " PA ", " PA,", "Pennsylvania", " DC ", " DC,", "District of Columbia", "D.C.", " MD ", " MD,", "Maryland", " DE ", " DE,", "Delaware", " NJ ", " NJ,", "New Jersey", " NY ", " NY,", "New York", " CT ", " CT,", "Connecticut", " RI ", " RI,", "Rhode Island", " MA ", " MA,", "Massachusetts", " NH ", " NH,", "New Hampshire", " ME ", " ME,", "Maine", " VT ", " VT,", "Vermont"]
+    global easternStates := [" FL ", " FL,", "Florida", " GA ", " GA,", "Georgia", " SC ", " SC,", "Sourth Carolina", " NC ", " NC,", "North Carolina", " VA ", " VA,", "Virginia", " WV ", " WV,", "West Virginia", " OH ", " OH,", "Ohio", " MI ", " MI,", "Mississippi", " PA ", " PA,", "Pennsylvania", " DC ", " DC,", "District of Columbia", "D.C.", " MD ", " MD,", "Maryland", " DE ", " DE,", "Delaware", " NJ ", " NJ,", "New Jersey", " NY ", " NY,", "New York", "York New", " CT ", " CT,", "Connecticut", " RI ", " RI,", "Rhode Island", " MA ", " MA,", "Massachusetts", " NH ", " NH,", "New Hampshire", " ME ", " ME,", "Maine", " VT ", " VT,", "Vermont"]
     global alaskaState := [" AK ", " AK,", "Alaska"]
     global hawaiiState := [" HI ", " HI,", "Hawaii"]
 
     ;global boolGetPhone := false
 
     ; Display Tooltip with sub-hotkey options and the option to select multiple
-    SubKeys := GetSubKeys()
+    SubKeys := GetSubKeys(inputValues)
 
     ; If no valid keys were entered, exit the script
     if (SubKeys = "") {
         Exit
     }
-    
-    WinActivate("A")
 
     hwnd := ActivateChromeWindow()
     Sleep(40)
@@ -981,6 +1027,7 @@ F1:: {
     gotClip := ClipWait(1)
     Sleep(40)
 
+    global savedNames := ""
     RunScript:
     global numGoogleSearches := StrLen(SubKeys)
 
@@ -989,22 +1036,23 @@ F1:: {
     for i, singleKey in StrSplit(SubKeys) {
 
         if singleKey = "w" {
-            CheckForUpdates("all")
+            SubKeys := CheckForUpdates("all", SubKeys, rootElement)
             updatesChecked := true
             goto RunScript
         }
 
         if singleKey = "q" && !updatesChecked {
-            CheckForUpdates("")
+            SubKeys := CheckForUpdates("", SubKeys, rootElement) . SubKeys
             updatesChecked := true
             goto RunScript
         }
 
         if singleKey = "q" {
             Sleep(300)
-            
-            permNextButton := rootElement.WaitElementFromPath({T:30}, {T:20, i:7})
-            if permNextButton.Name == " Auto Save" {
+            permNextButton := rootElement.WaitElementFromPath({T:30}, {T:20, i:11})
+            if permNextButton.Name == "First Name" {
+                permNextButton := rootElement.WaitElementFromPath({T:30}, {T:20, i:7}).Click()
+            } else if InStr(permNextButton.Name, "Auto Save") {
                 permNextButton := rootElement.WaitElementFromPath({T:30}, {T:20, i:6}).Click()
             } else {
                 permNextButton.Click()
@@ -1017,7 +1065,7 @@ F1:: {
         }
 
         if singleKey = "1" || singleKey = "2" || singleKey = "3" || singleKey = "4" || singleKey = "5" || singleKey = "6" {
-            if CallContact(singleKey) {
+            if CallContact(singleKey, rootElement) {
                 ToolTip("Successfully Grabbed Number")
                 SetTimer () => ToolTip(""), -2000
                 continue
@@ -1032,23 +1080,26 @@ F1:: {
             clipboardContent := A_Clipboard
             if (clipboardContent = "") {
                 ; If somehow clipboard is empty, fallback to growably
-                names := GetGrowablyNames(singleKey)
+                names := GetGrowablyNames(singleKey, rootElement)
                 if (names = "false" || names = "") {
                     ToolTip("No text was selected and unable to get data from Growably for subkey: " singleKey)
                     SetTimer () => ToolTip(""), -2000
                     continue
                 }
+                savedNames := names
             } else {
                 names := clipboardContent
+                savedNames := names
             }
         } else {
             ; No clipboard text found, get from growably
-            names := GetGrowablyNames(singleKey)
+            names := GetGrowablyNames(singleKey, rootElement)
             if (names = "false" || names = "" || InStr(names, "internal")) {
                 ToolTip("No text was selected (but you knew that) and unable to get data from Growably for subkey: " singleKey)
                 SetTimer () => ToolTip(""), -2000
                 continue
             }
+            savedNames := names
         }
 
         ; Determine keywords based on singleKey
@@ -1056,7 +1107,7 @@ F1:: {
         if InStr(singleKey, "z") || singleKey = "a" {
             for state in pacificStates {
                 if InStr(names, state) {
-                    updateGrowablyTimeZone("PST")
+                    updateGrowablyTimeZone("PST", savedNames, rootElement)
                     noSearch := true
                     break
                 }
@@ -1064,7 +1115,7 @@ F1:: {
 
             for state in mountainStates {
                 if InStr(names, state) {
-                    updateGrowablyTimeZone("MST")
+                    updateGrowablyTimeZone("MST", savedNames, rootElement)
                     noSearch := true
                     break
                 }
@@ -1072,7 +1123,7 @@ F1:: {
 
             for state in centralStates {
                 if InStr(names, state) {
-                    updateGrowablyTimeZone("CST")
+                    updateGrowablyTimeZone("CST", savedNames, rootElement)
                     noSearch := true
                     break
                 }
@@ -1080,7 +1131,23 @@ F1:: {
 
             for state in easternStates {
                 if InStr(names, state) {
-                    updateGrowablyTimeZone("EST")
+                    updateGrowablyTimeZone("EST", savedNames, rootElement)
+                    noSearch := true
+                    break
+                }
+            }
+
+            for state in alaskaState {
+                if InStr(names, state) {
+                    updateGrowablyTimeZone("AKST", savedNames, rootElement)
+                    noSearch := true
+                    break
+                }
+            }
+
+            for state in hawaiiState {
+                if InStr(names, state) {
+                    updateGrowablyTimeZone("HST", savedNames, rootElement)
                     noSearch := true
                     break
                 }
@@ -1090,9 +1157,11 @@ F1:: {
                 noSearch := false
                 continue
             }
+
             Keywords.Push("time zone")
             boolGetTimeZone := true
         }
+
         if InStr(singleKey, "t") {
             Keywords.Push("COO", "CEO", "current COO", "current CEO", "current CFO")
             boolGetName := true
@@ -1113,11 +1182,11 @@ F1:: {
 
         if boolGetName {
             if names = "false" || names = "" || names = 0 || names = "false" || names = "null" {
-                names := GetGrowablyNames("t")
+                names := GetGrowablyNames("t", rootElement)
             }
 
             ; Get the name of the contact
-            contactFullName := GetGrowablyNames("@")
+            contactFullName := GetGrowablyNames("@", rootElement)
         }
 
         searchTerms := ProcessClipboardContent(names)
@@ -1148,7 +1217,7 @@ F1:: {
             boolGetTimeZone := false
             Sleep(1000)
             if timeZone != "" || timeZone != "null" || timeZone != "false" || timeZone != "0" {
-                UpdateGrowablyTimeZone(timezone)
+                UpdateGrowablyTimeZone(timezone, savedNames, rootElement)
             } else {
                 ToolTip("Failed to update time zone within Growably.")
                 SetTimer () => ToolTip(""), -2000
@@ -1189,6 +1258,7 @@ F1:: {
     contactName := ""
     businessName := ""
     companyLocation := ""
+    savedNames := ""
 
     A_Clipboard := ClipSaved
     return
@@ -1454,7 +1524,7 @@ ClickElementByPath(pathOrElement, rootElement := "", value := "", timeout := 200
     }
 
     ; Activate the Chrome window before any further action
-    WinActivate("ahk_exe chrome.exe")
+    ActivateChromeWindow()
     
     ; Retrieve and adjust the element's coordinates (adjust with ScrollIntoView and Send("{WheelDown}"))
     coords := GetElementCoordinates(element, rootElement , alignToElement)
