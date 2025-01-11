@@ -44,6 +44,7 @@ GetRootElementSafely(hwnd) {
 
 ; Function to count elements in the array
 GetArrayLength(arr) {
+
     count := 0
     for _, _ in arr {
         count++
@@ -54,7 +55,7 @@ GetArrayLength(arr) {
 ; Function to handle key input loop
 GetSubKeys(inputValues) {
     ; Display Tooltip with sub-hotkey options and the option to select multiple
-    ToolTip("Select multiple sub-hotkeys:`nW: Check for updates`n1-3: Call Contact 1-3 & Company 4-6`nT: Title search`nC: Contact info search`nN: News search`nE: Email address search`nP: Phone # search`nZ: time Zone search`nPress keys one after another.")
+    ToolTip("Select multiple sub-hotkeys:`nW: Check for updates`nL: Log All Growably #'s into Notes`n1-3: Call Contact 1-3 & 4-6: Company 1-3`nT: Title search`nC: Contact info search`nN: News search`nE: Email address search`nP: Phone # search`nZ: time Zone search`nPress keys one after another.")
 
     ; Initialize an empty string for the subkeys
     SubKeys := ""
@@ -186,6 +187,7 @@ GetGrowablyNames(SubKeys, rootElement) {
     ; Get HWND and rootElement of the active Chrome window
     hwnd := ActivateChromeWindow()
     rootElement := GetRootElementSafely(hwnd)
+    names := ""
 
     ; Get the contact's name from Growably
     if InStr(SubKeys, "p") || InStr(SubKeys, "e") || InStr(SubKeys, "c") || InStr(SubKeys, "a") || InStr(SubKeys, "n") || InStr(SubKeys, "@") {
@@ -879,6 +881,113 @@ CallContact(callNumber, rootElement) {
     return true
 }
 
+LoadNumbersIntoNotes(rootElement) {
+    global allNumbers := ""
+
+    Loop 7 {
+        global allNumbers
+        if (A_Index >= 1 && A_Index <= 3) {
+            try {
+                callNumberName := "Contact Phone " . A_Index
+                callNumberElement := rootElement.FindFirst({LocalizedType: "edit", Name: callNumberName})
+                if callNumberElement.Value == "" {
+                    ToolTip("No " callNumberName " to grab.")
+                    SetTimer () => ToolTip(""), -2000
+                    continue
+                }
+                if InStr(allNumbers, callNumberElement.Value) {
+                    continue
+                }
+                allNumbers := allNumbers callNumberElement.Value " - `n"
+                Sleep(60)
+            } catch {
+                ToolTip("Failed to get " callNumberName " from Growably. Did you mean to select a different number?")
+                SetTimer () => ToolTip(""), -2000
+            }
+        }
+
+        if (A_Index >= 4 && A_Index <= 6) {
+            try {
+                callNumberName := "Company Phone " . A_Index - 3
+                callNumberElement := rootElement.FindFirst({LocalizedType: "edit", Name: callNumberName})
+                if callNumberElement.Value == "" {
+                    ToolTip("No " callNumberName " to grab.")
+                    SetTimer () => ToolTip(""), -2000
+                    continue
+                }
+                if InStr(allNumbers, callNumberElement.Value) {
+                    continue
+                }
+                allNumbers := allNumbers callNumberElement.Value " - `n"
+                Sleep(60)
+            } catch {
+                ToolTip("Failed to get " callNumberName " from Growably. Did you mean to select a different number?")
+                SetTimer () => ToolTip(""), -2000
+            }
+        }
+
+        if (A_Index == 7) {
+            callNumberName := "Contact Mobile Phone"
+            callNumberElement := rootElement.FindFirst({LocalizedType: "edit", Name: callNumberName})
+            if callNumberElement.Value == "" {
+                ToolTip("No " callNumberName " to grab.")
+                SetTimer () => ToolTip(""), -2000
+                continue
+            }
+            if InStr(allNumbers, callNumberElement.Value) {
+                continue
+            }
+            allNumbers := allNumbers callNumberElement.Value " - `n"
+            Sleep(60)
+        }
+    }
+
+    if allNumbers == "" {
+        ToolTip("No numbers to load into notes.")
+        SetTimer () => ToolTip(""), -2000
+        return false
+    }
+
+    try {
+        notesTab := rootElement.FindFirst({AutomationID: "notes-tab"})
+        notesTab.Click()
+        Sleep(500)
+        addNoteButton := rootElement.WaitElement({LocalizedType: "link" , Name: "+ Add"}, 1000)
+        if addNoteButton == 0 {
+            ToolTip("Failed to find add note button.")
+            SetTimer () => ToolTip(""), -2000
+            Sleep(2000)
+            return false
+        }
+        addNoteButton.Click()
+        editNote := rootElement.WaitElement({LocalizedType: "edit", Name: "New note"}, 1000)
+        if editNote == 0 {
+            ToolTip("Failed to find edit note button.")
+            SetTimer () => ToolTip(""), -2000
+            Sleep(2000)
+            return false
+        }
+        editNote.Click()
+        Sleep(40)
+        Send(allNumbers)
+        Sleep(1000)
+        saveBtn := rootElement.WaitElement({LocalizedType: "button", Name: "Save"}, 1000)
+        if saveBtn == 0 {
+            ToolTip("Failed to find save button.")
+            SetTimer () => ToolTip(""), -2000
+            Sleep(2000)
+            return false
+        }
+        saveBtn.Click()
+        return true
+    } catch {
+        ToolTip("Failed to load numbers into notes.")
+        SetTimer () => ToolTip(""), -2000
+        Sleep(2000)
+        return false
+    }
+}
+
 CheckForUpdates(type, SubKeys, rootElement) {
 
     global strSubKeys := ""
@@ -982,7 +1091,7 @@ CheckForUpdates(type, SubKeys, rootElement) {
 F1:: {
 
     ; Define acceptable subkeys for inputValues
-    global inputValues := "tcnpeazwq123456"
+    global inputValues := "tcnpeazwql123456"
     global contactName
     global businessName
     global companyLocation
@@ -1035,6 +1144,11 @@ F1:: {
     ; If we have multiple subkeys, we do separate searches for each.
     for i, singleKey in StrSplit(SubKeys) {
 
+        if singleKey = "l" {
+            LoadNumbersIntoNotes(rootElement)
+            continue
+        }
+
         if singleKey = "w" {
             SubKeys := CheckForUpdates("all", SubKeys, rootElement)
             updatesChecked := true
@@ -1050,7 +1164,7 @@ F1:: {
         if singleKey = "q" {
             Sleep(300)
             permNextButton := rootElement.WaitElementFromPath({T:30}, {T:20, i:11})
-            if permNextButton.Name == "First Name" {
+            if permNextButton.Name == "First Name" || permNextButton.Name == "Followers" {
                 permNextButton := rootElement.WaitElementFromPath({T:30}, {T:20, i:7}).Click()
             } else if InStr(permNextButton.Name, "Auto Save") {
                 permNextButton := rootElement.WaitElementFromPath({T:30}, {T:20, i:6}).Click()
